@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Bun
+bun.lockb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
+coverage/
+
+# Secrets (never commit these!)
+.env
+.env.*
+*.pem
+*.key
+secrets.db
+
+# Secret Keeper data
+.secret-keeper/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/
