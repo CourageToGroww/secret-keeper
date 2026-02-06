@@ -134,8 +134,7 @@ async function promptMcpSetup(): Promise<void> {
   }
 
   // Resolve the MCP server command path
-  const skDir = resolve(__dirname, "..");
-  const indexPath = resolve(skDir, "src/index.ts");
+  const indexPath = resolve(__dirname, __filename);
   const bunPath = join(process.env.HOME || "", ".bun/bin/bun");
 
   // Check if already configured (user-level or project-level)
@@ -643,7 +642,7 @@ program
     if (options.direnv) {
       const envrcPath = join(fullPath, ".envrc");
       const bunPath = join(process.env.HOME || "", ".bun/bin/bun");
-      const skPath = resolve(__dirname, "../src/index.ts");
+      const skPath = resolve(__dirname, __filename);
 
       const envrcContent = `# Secret Keeper - Auto-start daemon when entering directory
 # Requires: direnv (https://direnv.net)
@@ -677,7 +676,7 @@ fi
       console.log();
 
       const bunPath = join(process.env.HOME || "", ".bun/bin/bun");
-      const skPath = resolve(__dirname, "../src/index.ts");
+      const skPath = resolve(__dirname, __filename);
 
       console.log(chalk.bold("Option 1: Add to shell config (~/.bashrc or ~/.zshrc):"));
       console.log(chalk.dim(`
@@ -1521,9 +1520,7 @@ program
       logQuiet.info("Starting daemon...");
 
       const cwd = process.cwd();
-      // Use the secret-keeper installation path, not the current project
-      const skDir = resolve(__dirname, "..");
-      const indexPath = resolve(skDir, "src/index.ts");
+      const indexPath = resolve(__dirname, __filename);
       const bunPath = (process.env.HOME || "") + "/.bun/bin/bun";
 
       // Build command args
@@ -1714,8 +1711,7 @@ program
       log.info("Starting daemon...");
 
       const cwd = process.cwd();
-      const skDir = resolve(__dirname, "..");
-      const indexPath = resolve(skDir, "src/index.ts");
+      const indexPath = resolve(__dirname, __filename);
       const bunPath = (process.env.HOME || "") + "/.bun/bin/bun";
 
       const args = ["run", indexPath, "daemon"];

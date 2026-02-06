@@ -1,17 +1,27 @@
 {
   "name": "secret-keeper",
   "version": "1.0.0",
-  "description": "Secure secret management for Claude Code and AI assistants",
+  "description": "Secure secret management for Claude Code and AI assistants. One command setup: sk auto",
   "type": "module",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
   "bin": {
-    "secret-keeper": "src/index.ts",
-    "sk": "src/index.ts"
+    "secret-keeper": "dist/index.js",
+    "sk": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun --watch src/index.ts",
+    "build": "bun build src/index.ts src/mcp.ts --outdir dist --target bun --packages external",
+    "prepublishOnly": "npm run build",
     "test": "bun test"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.3",
@@ -31,9 +41,19 @@
     "secrets",
     "security",
     "claude",
+    "claude-code",
+    "mcp",
     "ai",
-    "encryption"
+    "encryption",
+    "env",
+    "dotenv",
+    "vault"
   ],
-  "author": "",
-  "license": "MIT"
+  "author": "CourageToGroww",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CourageToGroww/secret-keeper.git"
+  },
+  "homepage": "https://github.com/CourageToGroww/secret-keeper#readme"
 }
