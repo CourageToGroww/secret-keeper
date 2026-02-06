@@ -17,6 +17,7 @@
     "start": "bun run src/index.ts",
     "dev": "bun --watch src/index.ts",
     "build": "bun build src/index.ts src/mcp.ts --outdir dist --target bun --packages external",
+    "prepare": "bun build src/index.ts src/mcp.ts --outdir dist --target bun --packages external",
     "prepublishOnly": "npm run build",
     "test": "bun test"
   },
