@@ -122,6 +122,90 @@ async function confirm(message: string): Promise<boolean> {
 }
 
 /**
+ * Check if Claude Code MCP is configured and prompt to add it if not.
+ */
+async function promptMcpSetup(): Promise<void> {
+  // Check if claude CLI is available
+  try {
+    const which = Bun.spawnSync(["which", "claude"]);
+    if (which.exitCode !== 0) return; // Claude Code not installed, skip
+  } catch {
+    return;
+  }
+
+  // Resolve the MCP server command path
+  const skDir = resolve(__dirname, "..");
+  const indexPath = resolve(skDir, "src/index.ts");
+  const bunPath = join(process.env.HOME || "", ".bun/bin/bun");
+
+  // Check if already configured (user-level or project-level)
+  const userMcpPath = join(process.env.HOME || "", ".claude.json");
+  const projectMcpPath = join(process.cwd(), ".mcp.json");
+
+  let alreadyConfigured = false;
+  for (const configPath of [userMcpPath, projectMcpPath]) {
+    if (existsSync(configPath)) {
+      try {
+        const content = readFileSync(configPath, "utf-8");
+        if (content.includes("secret-keeper")) {
+          alreadyConfigured = true;
+          break;
+        }
+      } catch {
+        // Ignore read errors
+      }
+    }
+  }
+
+  if (alreadyConfigured) return;
+
+  console.log();
+  log.info("Claude Code MCP integration not configured.");
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  const answer = await new Promise<string>((resolve) => {
+    rl.question(
+      `Add secret-keeper MCP server?\n` +
+      `  ${chalk.bold("1)")} Globally (all projects)\n` +
+      `  ${chalk.bold("2)")} This project only\n` +
+      `  ${chalk.bold("3)")} Skip\n` +
+      `Choice [1/2/3]: `,
+      (ans) => {
+        rl.close();
+        resolve(ans.trim());
+      }
+    );
+  });
+
+  if (answer === "1" || answer === "2") {
+    const scope = answer === "1" ? "user" : "project";
+    const proc = Bun.spawnSync([
+      "claude", "mcp", "add",
+      "--scope", scope,
+      "secret-keeper",
+      bunPath, "--",
+      "run", indexPath, "mcp",
+    ]);
+
+    if (proc.exitCode === 0) {
+      const scopeLabel = scope === "user" ? "globally" : "for this project";
+      log.success(`MCP server added ${scopeLabel}. Restart Claude Code to activate.`);
+    } else {
+      const stderr = proc.stderr.toString().trim();
+      log.error(`Failed to add MCP server: ${stderr || "unknown error"}`);
+      log.dim(`You can add it manually: claude mcp add --scope ${scope} secret-keeper ${bunPath} -- run ${indexPath} mcp`);
+    }
+  } else {
+    log.dim("Skipped. You can add it later with:");
+    log.dim(`  claude mcp add --scope user secret-keeper ${bunPath} -- run ${indexPath} mcp`);
+  }
+}
+
+/**
  * Get password from env var, keyfile, or prompt.
  * Automatically checks keyfile locations based on vault type.
  */
@@ -215,8 +299,7 @@ program
   .option("-d, --delete", "Delete .env file after import", true)
   .option("-D, --no-delete", "Keep .env file after import")
   .option("-s, --secure-delete", "Securely overwrite file before deletion")
-  .option("-S, --secrets-only", "Only import values that look like secrets (KEY, SECRET, TOKEN, etc.)", true)
-  .option("-A, --all", "Import all values, not just secrets")
+  .option("-S, --secrets-only", "Only import values that look like secrets (KEY, SECRET, TOKEN, etc.)")
   .action(async (envFile, options) => {
     if (!existsSync(envFile)) {
       log.error(`File not found: ${envFile}`);
@@ -233,14 +316,13 @@ program
     await db.unlock(password);
 
     const content = readFileSync(envFile, "utf-8");
-    const secretsOnly = options.all ? false : options.secretsOnly;
+    const secretsOnly = options.secretsOnly ?? false;
     const [count, names, skipped] = await db.importFromEnv(content, { secretsOnly });
 
-    log.success(`Imported ${count} secret(s): ${names.join(", ")}`);
+    log.success(`Imported ${count} entries: ${names.join(", ")}`);
 
     if (skipped.length > 0) {
       log.dim(`Skipped ${skipped.length} non-secret(s): ${skipped.join(", ")}`);
-      log.dim("Use --all to import everything");
     }
 
     if (options.delete) {
@@ -1373,7 +1455,26 @@ program
         await db.unlock(password);
       }
 
-      // Step 2: Check if daemon is running
+      // Step 2: Auto-import .env files if present
+      const envFiles = [".env"];
+      for (const envFile of envFiles) {
+        const envPath = join(process.cwd(), envFile);
+        if (existsSync(envPath)) {
+          const content = readFileSync(envPath, "utf-8");
+          const [count, names] = await db.importFromEnv(content);
+
+          if (count > 0) {
+            logQuiet.success(`Imported ${count} entries from ${envFile}: ${names.join(", ")}`);
+
+            // Delete .env after successful import
+            const fs = await import("fs/promises");
+            await fs.unlink(envPath);
+            logQuiet.dim(`Deleted ${envFile} (secrets are now in the vault)`);
+          }
+        }
+      }
+
+      // Step 3: Check if daemon is running
       const socketPath = useLocal
         ? getProjectSocketPath(process.cwd())
         : DEFAULT_SOCKET_PATH;
@@ -1458,6 +1559,11 @@ program
         }
       } else {
         logQuiet.warning("Daemon may have failed to start. Check /tmp/secret-keeper/daemon.log");
+      }
+
+      // Step 4: Check if Claude Code MCP integration is configured
+      if (!quiet) {
+        await promptMcpSetup();
       }
 
       db.close();

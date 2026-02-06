@@ -456,14 +456,16 @@ export class SecretDatabase {
 
       // Filter if secretsOnly mode is enabled
       if (options.secretsOnly) {
-        // Only import values whose name contains a secret pattern
         if (!this.isSecretName(name)) {
           skipped.push(name);
           continue;
         }
       }
 
-      await this.addSecret(name, value);
+      // Auto-classify: secret-like names are sensitive (masked),
+      // everything else is a credential (stored but visible in listings)
+      const sensitive = this.isSecretName(name);
+      await this.addSecret(name, value, { sensitive });
       imported.push(name);
     }
 
