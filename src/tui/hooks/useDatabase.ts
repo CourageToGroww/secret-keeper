@@ -31,7 +31,7 @@ export interface DatabaseActions {
   deleteSecret: (name: string) => Promise<void>;
   getSecret: (name: string) => Promise<string>;
   getAllSecrets: () => Promise<Record<string, string>>;
-  importFromEnv: (content: string, secretsOnly?: boolean) => Promise<[number, string[], string[]]>;
+  importFromEnv: (content: string, secretsOnly?: boolean) => Promise<{ secrets: string[]; credentials: string[]; skipped: string[] }>;
   
   // Rotation operations
   rotateNow: (secretName: string) => Promise<RotationResult>;
@@ -118,7 +118,7 @@ export function useDatabase(
   );
 
   const importFromEnv = useCallback(
-    async (content: string, secretsOnly: boolean = true): Promise<[number, string[], string[]]> => {
+    async (content: string, secretsOnly: boolean = false): Promise<{ secrets: string[]; credentials: string[]; skipped: string[] }> => {
       const result = await db.importFromEnv(content, { secretsOnly });
       refresh();
       return result;

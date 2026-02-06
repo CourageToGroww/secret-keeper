@@ -418,11 +418,12 @@ export class SecretDatabase {
   async importFromEnv(
     content: string,
     options: { secretsOnly?: boolean } = {}
-  ): Promise<[number, string[], string[]]> {
+  ): Promise<{ secrets: string[]; credentials: string[]; skipped: string[] }> {
     this.ensureUnlocked();
 
     const lines = content.split("\n");
-    const imported: string[] = [];
+    const secrets: string[] = [];
+    const credentials: string[] = [];
     const skipped: string[] = [];
 
     for (const line of lines) {
@@ -466,10 +467,15 @@ export class SecretDatabase {
       // everything else is a credential (stored but visible in listings)
       const sensitive = this.isSecretName(name);
       await this.addSecret(name, value, { sensitive });
-      imported.push(name);
+
+      if (sensitive) {
+        secrets.push(name);
+      } else {
+        credentials.push(name);
+      }
     }
 
-    return [imported.length, imported, skipped];
+    return { secrets, credentials, skipped };
   }
 
   // ============================================================================

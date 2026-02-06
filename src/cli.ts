@@ -317,12 +317,23 @@ program
 
     const content = readFileSync(envFile, "utf-8");
     const secretsOnly = options.secretsOnly ?? false;
-    const [count, names, skipped] = await db.importFromEnv(content, { secretsOnly });
+    const result = await db.importFromEnv(content, { secretsOnly });
+    const total = result.secrets.length + result.credentials.length;
 
-    log.success(`Imported ${count} entries: ${names.join(", ")}`);
+    if (total > 0) {
+      log.success(`Imported ${total} entries from ${envFile}:`);
+      if (result.secrets.length > 0) {
+        log.info(`  Secrets (encrypted): ${result.secrets.join(", ")}`);
+      }
+      if (result.credentials.length > 0) {
+        log.dim(`  Credentials (visible): ${result.credentials.join(", ")}`);
+      }
+    } else {
+      log.warning("No entries found to import.");
+    }
 
-    if (skipped.length > 0) {
-      log.dim(`Skipped ${skipped.length} non-secret(s): ${skipped.join(", ")}`);
+    if (result.skipped.length > 0) {
+      log.dim(`Skipped ${result.skipped.length} non-secret(s): ${result.skipped.join(", ")}`);
     }
 
     if (options.delete) {
@@ -1461,15 +1472,22 @@ program
         const envPath = join(process.cwd(), envFile);
         if (existsSync(envPath)) {
           const content = readFileSync(envPath, "utf-8");
-          const [count, names] = await db.importFromEnv(content);
+          const result = await db.importFromEnv(content);
+          const total = result.secrets.length + result.credentials.length;
 
-          if (count > 0) {
-            logQuiet.success(`Imported ${count} entries from ${envFile}: ${names.join(", ")}`);
+          if (total > 0) {
+            logQuiet.success(`Imported ${total} entries from ${envFile}:`);
+            if (result.secrets.length > 0) {
+              logQuiet.info(`  Secrets (encrypted): ${result.secrets.join(", ")}`);
+            }
+            if (result.credentials.length > 0) {
+              logQuiet.dim(`  Credentials (visible): ${result.credentials.join(", ")}`);
+            }
 
             // Delete .env after successful import
             const fs = await import("fs/promises");
             await fs.unlink(envPath);
-            logQuiet.dim(`Deleted ${envFile} (secrets are now in the vault)`);
+            logQuiet.dim(`Deleted ${envFile} (now stored in vault)`);
           }
         }
       }
