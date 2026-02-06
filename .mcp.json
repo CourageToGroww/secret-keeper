@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "secret-keeper": {
+      "command": "/home/jake/.bun/bin/bun",
+      "args": ["run", "/home/jake/Programming/tools/secret-keeper/src/index.ts", "mcp"]
+    }
+  }
+}

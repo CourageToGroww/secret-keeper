@@ -14,6 +14,10 @@ import {
   VaultLockedError,
   SecretNotFoundError,
   InvalidPasswordError,
+  RotationConfig,
+  RotationHistoryEntry,
+  ProviderConfig,
+  ProviderType,
 } from "./types";
 import { encrypt, decrypt, hashPassword, verifyPassword } from "./crypto";
 
@@ -35,7 +39,8 @@ const SCHEMA = {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       description TEXT,
-      tags TEXT
+      tags TEXT,
+      sensitive INTEGER DEFAULT 1
     )
   `,
   auditLog: `
@@ -47,6 +52,27 @@ const SCHEMA = {
       details TEXT
     )
   `,
+  rotationConfig: `
+    CREATE TABLE IF NOT EXISTS rotation_config (
+      secret_name TEXT PRIMARY KEY REFERENCES secrets(name),
+      provider_type TEXT NOT NULL,
+      schedule_days INTEGER NOT NULL,
+      last_rotated TEXT,
+      next_rotation TEXT,
+      enabled INTEGER DEFAULT 1,
+      provider_config TEXT
+    )
+  `,
+  rotationHistory: `
+    CREATE TABLE IF NOT EXISTS rotation_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      secret_name TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      status TEXT NOT NULL,
+      provider_type TEXT NOT NULL,
+      error_message TEXT
+    )
+  `,
 };
 
 // ============================================================================
@@ -54,7 +80,7 @@ const SCHEMA = {
 // ============================================================================
 
 export class SecretDatabase {
-  private db: Database;
+  private db!: Database;
   private dbPath: string;
   private masterPassword: string | null = null;
 
@@ -148,6 +174,8 @@ export class SecretDatabase {
     this.db.exec(SCHEMA.vaultConfig);
     this.db.exec(SCHEMA.secrets);
     this.db.exec(SCHEMA.auditLog);
+    this.db.exec(SCHEMA.rotationConfig);
+    this.db.exec(SCHEMA.rotationHistory);
 
     // Store password hash and metadata
     const pwHash = hashPassword(masterPassword);
@@ -228,22 +256,25 @@ export class SecretDatabase {
     options: SecretOptions = {}
   ): Promise<boolean> {
     this.ensureUnlocked();
+    this.migrateSensitiveColumn();
 
     const encryptedValue = await encrypt(value, this.masterPassword!);
     const now = new Date().toISOString();
     const tags = options.tags ? JSON.stringify(options.tags) : null;
+    const sensitive = options.sensitive !== false ? 1 : 0;  // default to sensitive
 
     const stmt = this.db.prepare(`
-      INSERT INTO secrets (name, encrypted_value, created_at, updated_at, description, tags)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO secrets (name, encrypted_value, created_at, updated_at, description, tags, sensitive)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(name) DO UPDATE SET
         encrypted_value = excluded.encrypted_value,
         updated_at = excluded.updated_at,
         description = COALESCE(excluded.description, description),
-        tags = COALESCE(excluded.tags, tags)
+        tags = COALESCE(excluded.tags, tags),
+        sensitive = excluded.sensitive
     `);
 
-    stmt.run(name, encryptedValue, now, now, options.description || null, tags);
+    stmt.run(name, encryptedValue, now, now, options.description || null, tags, sensitive);
     this.logAudit("SECRET_ADDED", name);
     return true;
   }
@@ -291,10 +322,11 @@ export class SecretDatabase {
       throw new VaultNotInitializedError();
     }
     this.open();
+    this.migrateSensitiveColumn();
 
     const rows = this.db
       .prepare(
-        "SELECT name, created_at, updated_at, description, tags FROM secrets ORDER BY name"
+        "SELECT name, created_at, updated_at, description, tags, sensitive FROM secrets ORDER BY name"
       )
       .all() as Array<{
       name: string;
@@ -302,6 +334,7 @@ export class SecretDatabase {
       updated_at: string;
       description: string | null;
       tags: string | null;
+      sensitive: number | null;
     }>;
 
     return rows.map((row) => ({
@@ -310,6 +343,7 @@ export class SecretDatabase {
       updatedAt: row.updated_at,
       description: row.description,
       tags: row.tags ? JSON.parse(row.tags) : [],
+      sensitive: row.sensitive !== 0,  // default to true for old entries
     }));
   }
 
@@ -348,13 +382,48 @@ export class SecretDatabase {
   }
 
   /**
-   * Import secrets from .env file content
+   * Check if a variable name looks like a secret (vs a config value)
    */
-  async importFromEnv(content: string): Promise<[number, string[]]> {
+  private isSecretName(name: string): boolean {
+    const upperName = name.toUpperCase();
+    const secretPatterns = [
+      'SECRET', 'KEY', 'TOKEN', 'PASSWORD', 'PASS', 'PWD',
+      'CREDENTIAL', 'PRIVATE', 'AUTH', 'API_KEY', 'APIKEY',
+      'ACCESS_KEY', 'ACCESSKEY', 'CLIENT_SECRET'
+    ];
+    return secretPatterns.some(pattern => upperName.includes(pattern));
+  }
+
+  /**
+   * Check if a variable name looks like a non-secret config value
+   */
+  private isConfigName(name: string): boolean {
+    const upperName = name.toUpperCase();
+    const configPatterns = [
+      'URL', 'HOST', 'PORT', 'ENDPOINT', 'DOMAIN', 'REGION',
+      'ZONE', 'ENV', 'MODE', 'DEBUG', 'LOG', 'TIMEOUT',
+      'USERNAME', 'USER', 'EMAIL', 'ID', 'CLIENT_ID', 'APP_ID',
+      'PROJECT', 'BUCKET', 'DATABASE', 'DB_NAME', 'TABLE'
+    ];
+    return configPatterns.some(pattern => upperName.includes(pattern));
+  }
+
+  /**
+   * Import secrets from .env file content
+   * @param content - The .env file content
+   * @param options - Import options
+   * @param options.secretsOnly - Only import values that look like secrets (contain KEY, SECRET, TOKEN, etc.)
+   * @returns [importedCount, importedNames, skippedNames]
+   */
+  async importFromEnv(
+    content: string,
+    options: { secretsOnly?: boolean } = {}
+  ): Promise<[number, string[], string[]]> {
     this.ensureUnlocked();
 
     const lines = content.split("\n");
     const imported: string[] = [];
+    const skipped: string[] = [];
 
     for (const line of lines) {
       const trimmed = line.trim();
@@ -381,13 +450,24 @@ export class SecretDatabase {
         value = value.slice(1, -1);
       }
 
-      if (name && value) {
-        await this.addSecret(name, value);
-        imported.push(name);
+      if (!name || !value) {
+        continue;
       }
+
+      // Filter if secretsOnly mode is enabled
+      if (options.secretsOnly) {
+        // Only import values whose name contains a secret pattern
+        if (!this.isSecretName(name)) {
+          skipped.push(name);
+          continue;
+        }
+      }
+
+      await this.addSecret(name, value);
+      imported.push(name);
     }
 
-    return [imported.length, imported];
+    return [imported.length, imported, skipped];
   }
 
   // ============================================================================
@@ -472,6 +552,265 @@ export class SecretDatabase {
       action: row.action,
       secretName: row.secret_name,
       details: row.details,
+    }));
+  }
+
+  // ============================================================================
+  // Rotation Configuration
+  // ============================================================================
+
+  /**
+   * Migrate existing vaults to add rotation tables
+   */
+  migrateRotationTables(): void {
+    this.open();
+    this.db.exec(SCHEMA.rotationConfig);
+    this.db.exec(SCHEMA.rotationHistory);
+  }
+
+  /**
+   * Migrate to add sensitive column to secrets table
+   */
+  private migrateSensitiveColumn(): void {
+    this.open();
+    // Check if column exists
+    const tableInfo = this.db.prepare("PRAGMA table_info(secrets)").all() as Array<{ name: string }>;
+    const hasSensitive = tableInfo.some((col) => col.name === "sensitive");
+    if (!hasSensitive) {
+      this.db.exec("ALTER TABLE secrets ADD COLUMN sensitive INTEGER DEFAULT 1");
+    }
+  }
+
+  /**
+   * Set rotation configuration for a secret
+   */
+  setRotationConfig(config: RotationConfig): void {
+    this.ensureUnlocked();
+    this.migrateRotationTables();
+
+    const stmt = this.db.prepare(`
+      INSERT INTO rotation_config (secret_name, provider_type, schedule_days, last_rotated, next_rotation, enabled, provider_config)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(secret_name) DO UPDATE SET
+        provider_type = excluded.provider_type,
+        schedule_days = excluded.schedule_days,
+        last_rotated = excluded.last_rotated,
+        next_rotation = excluded.next_rotation,
+        enabled = excluded.enabled,
+        provider_config = excluded.provider_config
+    `);
+
+    stmt.run(
+      config.secretName,
+      config.providerType,
+      config.scheduleDays,
+      config.lastRotated,
+      config.nextRotation,
+      config.enabled ? 1 : 0,
+      JSON.stringify(config.providerConfig)
+    );
+  }
+
+  /**
+   * Get rotation configuration for a secret
+   */
+  getRotationConfig(secretName: string): RotationConfig | null {
+    this.open();
+    this.migrateRotationTables();
+
+    const row = this.db
+      .prepare("SELECT * FROM rotation_config WHERE secret_name = ?")
+      .get(secretName) as {
+      secret_name: string;
+      provider_type: string;
+      schedule_days: number;
+      last_rotated: string | null;
+      next_rotation: string | null;
+      enabled: number;
+      provider_config: string;
+    } | null;
+
+    if (!row) return null;
+
+    return {
+      secretName: row.secret_name,
+      providerType: row.provider_type as ProviderType,
+      scheduleDays: row.schedule_days,
+      lastRotated: row.last_rotated,
+      nextRotation: row.next_rotation,
+      enabled: row.enabled === 1,
+      providerConfig: JSON.parse(row.provider_config) as ProviderConfig,
+    };
+  }
+
+  /**
+   * List all rotation configurations
+   */
+  listRotationConfigs(): RotationConfig[] {
+    this.open();
+    this.migrateRotationTables();
+
+    const rows = this.db
+      .prepare("SELECT * FROM rotation_config ORDER BY secret_name")
+      .all() as Array<{
+      secret_name: string;
+      provider_type: string;
+      schedule_days: number;
+      last_rotated: string | null;
+      next_rotation: string | null;
+      enabled: number;
+      provider_config: string;
+    }>;
+
+    return rows.map((row) => ({
+      secretName: row.secret_name,
+      providerType: row.provider_type as ProviderType,
+      scheduleDays: row.schedule_days,
+      lastRotated: row.last_rotated,
+      nextRotation: row.next_rotation,
+      enabled: row.enabled === 1,
+      providerConfig: JSON.parse(row.provider_config) as ProviderConfig,
+    }));
+  }
+
+  /**
+   * Enable rotation for a secret
+   */
+  enableRotation(secretName: string): void {
+    this.ensureUnlocked();
+    this.migrateRotationTables();
+    this.db
+      .prepare("UPDATE rotation_config SET enabled = 1 WHERE secret_name = ?")
+      .run(secretName);
+  }
+
+  /**
+   * Disable rotation for a secret
+   */
+  disableRotation(secretName: string): void {
+    this.ensureUnlocked();
+    this.migrateRotationTables();
+    this.db
+      .prepare("UPDATE rotation_config SET enabled = 0 WHERE secret_name = ?")
+      .run(secretName);
+  }
+
+  /**
+   * Delete rotation configuration for a secret
+   */
+  deleteRotationConfig(secretName: string): void {
+    this.ensureUnlocked();
+    this.migrateRotationTables();
+    this.db
+      .prepare("DELETE FROM rotation_config WHERE secret_name = ?")
+      .run(secretName);
+  }
+
+  /**
+   * Update last rotated and next rotation dates
+   */
+  updateRotationDates(secretName: string, lastRotated: string, nextRotation: string): void {
+    this.ensureUnlocked();
+    this.migrateRotationTables();
+    this.db
+      .prepare("UPDATE rotation_config SET last_rotated = ?, next_rotation = ? WHERE secret_name = ?")
+      .run(lastRotated, nextRotation, secretName);
+  }
+
+  /**
+   * Get secrets due for rotation
+   */
+  getDueRotations(): RotationConfig[] {
+    this.open();
+    this.migrateRotationTables();
+
+    const now = new Date().toISOString();
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM rotation_config 
+        WHERE enabled = 1 AND (next_rotation IS NULL OR next_rotation <= ?)
+        ORDER BY next_rotation ASC
+      `)
+      .all(now) as Array<{
+      secret_name: string;
+      provider_type: string;
+      schedule_days: number;
+      last_rotated: string | null;
+      next_rotation: string | null;
+      enabled: number;
+      provider_config: string;
+    }>;
+
+    return rows.map((row) => ({
+      secretName: row.secret_name,
+      providerType: row.provider_type as ProviderType,
+      scheduleDays: row.schedule_days,
+      lastRotated: row.last_rotated,
+      nextRotation: row.next_rotation,
+      enabled: row.enabled === 1,
+      providerConfig: JSON.parse(row.provider_config) as ProviderConfig,
+    }));
+  }
+
+  // ============================================================================
+  // Rotation History
+  // ============================================================================
+
+  /**
+   * Add a rotation history entry
+   */
+  addRotationHistory(entry: Omit<RotationHistoryEntry, 'id'>): void {
+    this.open();
+    this.migrateRotationTables();
+
+    this.db
+      .prepare(`
+        INSERT INTO rotation_history (secret_name, timestamp, status, provider_type, error_message)
+        VALUES (?, ?, ?, ?, ?)
+      `)
+      .run(
+        entry.secretName,
+        entry.timestamp,
+        entry.status,
+        entry.providerType,
+        entry.errorMessage
+      );
+  }
+
+  /**
+   * Get rotation history entries
+   */
+  getRotationHistory(secretName?: string, limit: number = 50): RotationHistoryEntry[] {
+    this.open();
+    this.migrateRotationTables();
+
+    let query = "SELECT * FROM rotation_history";
+    const params: (string | number)[] = [];
+
+    if (secretName) {
+      query += " WHERE secret_name = ?";
+      params.push(secretName);
+    }
+
+    query += " ORDER BY id DESC LIMIT ?";
+    params.push(limit);
+
+    const rows = this.db.prepare(query).all(...params) as Array<{
+      id: number;
+      secret_name: string;
+      timestamp: string;
+      status: string;
+      provider_type: string;
+      error_message: string | null;
+    }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      secretName: row.secret_name,
+      timestamp: row.timestamp,
+      status: row.status as 'success' | 'failed',
+      providerType: row.provider_type as ProviderType,
+      errorMessage: row.error_message,
     }));
   }
 }

@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, unlinkSync, chmodSync } from "fs";
+import { existsSync, mkdirSync, unlinkSync, chmodSync, appendFileSync } from "fs";
+import { join } from "path";
 import { Socket } from "bun";
 import {
   SOCKET_DIR,
-  SOCKET_NAME,
   DEFAULT_SOCKET_PATH,
   MAX_MESSAGE_SIZE,
   CommandResult,
@@ -10,8 +10,11 @@ import {
   ListResponse,
   PingResponse,
   DaemonNotRunningError,
+  getProjectSocketPath,
+  findProjectSocketPath,
 } from "./types";
 import { SecretDatabase } from "./database";
+import { RotationManager, RotationScheduler } from "./rotation";
 
 // ============================================================================
 // Blocked Commands & Patterns
@@ -152,18 +155,93 @@ export class SecretKeeperDaemon {
   private validator: CommandValidator;
   private server: ReturnType<typeof Bun.listen> | null = null;
   private running: boolean = false;
+  private scheduler: RotationScheduler | null = null;
+  private db: SecretDatabase | null = null;
+  private logPath: string;
 
-  constructor(socketPath: string = DEFAULT_SOCKET_PATH) {
-    this.socketPath = socketPath;
+  constructor(socketPath?: string, projectPath?: string) {
+    // Use project-specific socket if projectPath provided, otherwise use provided socketPath or detect
+    this.socketPath = socketPath ?? (projectPath ? getProjectSocketPath(projectPath) : DEFAULT_SOCKET_PATH);
     this.validator = new CommandValidator();
+    this.logPath = join(SOCKET_DIR, "rotation.log");
   }
 
   /**
    * Load secrets from database
    */
   async loadSecrets(db: SecretDatabase): Promise<void> {
+    this.db = db;
     this.secrets = await db.getAllSecrets();
     this.scrubber = new OutputScrubber(this.secrets);
+  }
+
+  /**
+   * Start the rotation scheduler
+   */
+  startScheduler(checkIntervalMs: number = 60 * 60 * 1000): void {
+    if (!this.db) {
+      console.error("[Scheduler] Cannot start scheduler: database not loaded");
+      return;
+    }
+
+    const manager = new RotationManager(this.db);
+    
+    this.scheduler = new RotationScheduler(manager, {
+      checkIntervalMs,
+      onRotationComplete: (results) => {
+        // Log rotation results
+        const timestamp = new Date().toISOString();
+        for (const result of results) {
+          const logLine = `[${timestamp}] ${result.secretName}: ${result.success ? "SUCCESS" : `FAILED - ${result.error}`}\n`;
+          try {
+            appendFileSync(this.logPath, logLine);
+          } catch {
+            // Ignore logging errors
+          }
+          
+          // Reload secrets if rotation was successful
+          if (result.success && this.db) {
+            this.reloadSecrets();
+          }
+        }
+      },
+    });
+
+    this.scheduler.start();
+    console.log(`[Scheduler] Started (checking every ${Math.round(checkIntervalMs / 60000)} minutes)`);
+  }
+
+  /**
+   * Stop the rotation scheduler
+   */
+  stopScheduler(): void {
+    if (this.scheduler) {
+      this.scheduler.stop();
+      this.scheduler = null;
+      console.log("[Scheduler] Stopped");
+    }
+  }
+
+  /**
+   * Reload secrets from database (e.g., after rotation)
+   */
+  private async reloadSecrets(): Promise<void> {
+    if (!this.db) return;
+    
+    try {
+      this.secrets = await this.db.getAllSecrets();
+      this.scrubber = new OutputScrubber(this.secrets);
+      console.log("[Daemon] Secrets reloaded after rotation");
+    } catch (error) {
+      console.error("[Daemon] Failed to reload secrets:", error);
+    }
+  }
+
+  /**
+   * Check if scheduler is running
+   */
+  isSchedulerRunning(): boolean {
+    return this.scheduler?.isRunning() ?? false;
   }
 
   /**
@@ -329,6 +407,9 @@ export class SecretKeeperDaemon {
   stop(): void {
     this.running = false;
 
+    // Stop scheduler first
+    this.stopScheduler();
+
     if (this.server) {
       this.server.stop();
       this.server = null;
@@ -346,6 +427,7 @@ export class SecretKeeperDaemon {
     // Clear secrets from memory
     this.secrets = {};
     this.scrubber = null;
+    this.db = null;
   }
 
   /**
@@ -363,8 +445,9 @@ export class SecretKeeperDaemon {
 export class DaemonClient {
   private socketPath: string;
 
-  constructor(socketPath: string = DEFAULT_SOCKET_PATH) {
-    this.socketPath = socketPath;
+  constructor(socketPath?: string) {
+    // Auto-detect project-specific socket if no path provided
+    this.socketPath = socketPath ?? findProjectSocketPath();
   }
 
   /**
@@ -383,27 +466,49 @@ export class DaemonClient {
     }
 
     return new Promise((resolve, reject) => {
-      const socket = Bun.connect({
+      let resolved = false;
+      let responseData = "";
+
+      Bun.connect({
         unix: this.socketPath,
         socket: {
           open: (socket) => {
             socket.write(JSON.stringify(request));
-            socket.end();
+            // Don't end here - wait for response
           },
           data: (socket, data) => {
+            responseData += data.toString();
             try {
-              const response = JSON.parse(data.toString());
+              const response = JSON.parse(responseData);
+              resolved = true;
+              socket.end();
               if (response.error) {
                 reject(new Error(response.error));
               } else {
                 resolve(response as T);
               }
-            } catch (error) {
-              reject(error);
+            } catch {
+              // Incomplete JSON, wait for more data
             }
           },
-          close: (socket) => {
-            // Connection closed
+          close: () => {
+            if (!resolved) {
+              if (responseData) {
+                try {
+                  const response = JSON.parse(responseData);
+                  resolved = true;
+                  if (response.error) {
+                    reject(new Error(response.error));
+                  } else {
+                    resolve(response as T);
+                  }
+                } catch {
+                  reject(new Error("Invalid response from daemon"));
+                }
+              } else {
+                reject(new Error("Connection closed without response"));
+              }
+            }
           },
           error: (socket, error) => {
             reject(error);

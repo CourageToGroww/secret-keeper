@@ -20,6 +20,55 @@ export const DEFAULT_DB_DIR = `${process.env.HOME}/.secret-keeper`;
 export const DEFAULT_DB_NAME = "secrets.db";
 export const LOCAL_DB_DIR = ".secret-keeper";
 
+/** Common directories to scan for project vaults */
+export const PROJECT_SCAN_DIRS = [
+  process.env.HOME || "",
+  `${process.env.HOME}/Programming`,
+  `${process.env.HOME}/Projects`,
+  `${process.env.HOME}/Code`,
+  `${process.env.HOME}/code`,
+  `${process.env.HOME}/dev`,
+  `${process.env.HOME}/work`,
+  `${process.env.HOME}/Programming/ai`,
+  `${process.env.HOME}/Programming/tools`,
+  `${process.env.HOME}/Programming/ai/work`,
+];
+
+/**
+ * Get project-specific socket path based on project directory.
+ * Uses a hash of the absolute path to create unique socket names.
+ */
+export function getProjectSocketPath(projectPath: string): string {
+  // Create a simple hash of the project path
+  let hash = 0;
+  const absPath = projectPath.startsWith("/") ? projectPath : `${process.cwd()}/${projectPath}`;
+  for (let i = 0; i < absPath.length; i++) {
+    const char = absPath.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  const hashStr = Math.abs(hash).toString(16).padStart(8, "0");
+  return `${SOCKET_DIR}/project-${hashStr}.sock`;
+}
+
+/**
+ * Find the socket path for the current project.
+ * Checks for local vault first, falls back to global.
+ */
+export function findProjectSocketPath(cwd: string = process.cwd()): string {
+  const localVaultPath = `${cwd}/${LOCAL_DB_DIR}/${DEFAULT_DB_NAME}`;
+  // Check if local vault exists - if so, use project-specific socket
+  try {
+    const fs = require("fs");
+    if (fs.existsSync(localVaultPath)) {
+      return getProjectSocketPath(cwd);
+    }
+  } catch {
+    // Fall through to default
+  }
+  return DEFAULT_SOCKET_PATH;
+}
+
 export const MAX_MESSAGE_SIZE = 10 * 1024 * 1024; // 10 MB
 
 // ============================================================================
@@ -47,11 +96,13 @@ export interface SecretMetadata {
   updatedAt: string;
   description: string | null;
   tags: string[];
+  sensitive: boolean;  // true = secret (masked), false = credential (visible)
 }
 
 export interface SecretOptions {
   description?: string;
   tags?: string[];
+  sensitive?: boolean;  // defaults to true
 }
 
 export interface AuditEntry {
@@ -196,5 +247,70 @@ export class CommandBlockedError extends DaemonError {
   constructor(reason: string) {
     super(`Command blocked: ${reason}`);
     this.name = "CommandBlockedError";
+  }
+}
+
+// ============================================================================
+// Rotation Types
+// ============================================================================
+
+export type ProviderType = 'openai' | 'aws' | 'github' | 'custom';
+
+export interface OpenAIConfig {
+  type: 'openai';
+  apiKeyName: string; // Which secret holds the current API key
+}
+
+export interface AWSConfig {
+  type: 'aws';
+  accessKeyIdName: string;
+  secretAccessKeyName: string;
+  region?: string;
+}
+
+export interface GitHubConfig {
+  type: 'github';
+  tokenName: string;
+  scopes: string[];
+}
+
+export interface CustomConfig {
+  type: 'custom';
+  rotateCommand: string;  // Command that outputs new secret value
+  validateCommand?: string; // Optional validation command
+}
+
+export type ProviderConfig = OpenAIConfig | AWSConfig | GitHubConfig | CustomConfig;
+
+export interface RotationConfig {
+  secretName: string;
+  providerType: ProviderType;
+  scheduleDays: number;
+  lastRotated: string | null;
+  nextRotation: string | null;
+  enabled: boolean;
+  providerConfig: ProviderConfig;
+}
+
+export interface RotationHistoryEntry {
+  id: number;
+  secretName: string;
+  timestamp: string;
+  status: 'success' | 'failed';
+  providerType: ProviderType;
+  errorMessage: string | null;
+}
+
+export interface RotationResult {
+  success: boolean;
+  secretName: string;
+  newValue?: string;
+  error?: string;
+}
+
+export class RotationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RotationError";
   }
 }
