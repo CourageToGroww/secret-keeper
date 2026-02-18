@@ -6,8 +6,6 @@ export const SALT_SIZE = 32;
 export const NONCE_SIZE = 12;
 export const KEY_SIZE = 32;
 export const ITERATIONS = 600_000;
-export const PASSWORD_HASH_PREFIX = "secret-keeper-v1:";
-
 // ============================================================================
 // Path Constants
 // ============================================================================
@@ -76,7 +74,6 @@ export const MAX_MESSAGE_SIZE = 10 * 1024 * 1024; // 10 MB
 // ============================================================================
 
 export interface VaultConfig {
-  passwordHash: string;
   createdAt: string;
   version: string;
 }
@@ -116,11 +113,9 @@ export interface AuditEntry {
 export type AuditAction =
   | "VAULT_INITIALIZED"
   | "VAULT_UNLOCKED"
-  | "VAULT_LOCKED"
   | "SECRET_ADDED"
   | "SECRET_DELETED"
-  | "SECRETS_EXPORTED"
-  | "PASSWORD_CHANGED";
+  | "SECRETS_EXPORTED";
 
 // ============================================================================
 // Daemon Types
@@ -208,24 +203,10 @@ export class VaultNotInitializedError extends DatabaseError {
   }
 }
 
-export class VaultLockedError extends DatabaseError {
-  constructor() {
-    super("Vault is locked. Please provide the master password.");
-    this.name = "VaultLockedError";
-  }
-}
-
 export class SecretNotFoundError extends DatabaseError {
   constructor(name: string) {
     super(`Secret '${name}' not found.`);
     this.name = "SecretNotFoundError";
-  }
-}
-
-export class InvalidPasswordError extends DatabaseError {
-  constructor() {
-    super("Invalid master password.");
-    this.name = "InvalidPasswordError";
   }
 }
 

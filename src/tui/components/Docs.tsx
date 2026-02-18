@@ -103,10 +103,7 @@ export function Docs({ onBack }: DocsProps): React.ReactElement {
               <Text> </Text>
               <Text bold color="red">Manual (by design):</Text>
               <Text> </Text>
-              <Text>  • <Text bold>Password Entry</Text> - For vaults without keyfiles,</Text>
-              <Text>    you must enter the password to start the daemon</Text>
-              <Text> </Text>
-              <Text>  • <Text bold>Rotation Config</Text> - You must configure which</Text>
+              <Text>  - <Text bold>Rotation Config</Text> - You must configure which</Text>
               <Text>    secrets to rotate and how often</Text>
             </Box>
           </Box>
@@ -124,8 +121,7 @@ export function Docs({ onBack }: DocsProps): React.ReactElement {
               <Text dimColor>    sk add .env.local        # Or any .env variant</Text>
               <Text> </Text>
               <Text>  <Text bold>Single secret:</Text></Text>
-              <Text dimColor>    sk set MY_API_KEY        # Prompts for value</Text>
-              <Text dimColor>    sk set MY_KEY -v "value" # Direct value</Text>
+              <Text dimColor>    sk set MY_KEY -v "value"  # Set with value</Text>
               <Text> </Text>
               <Text>  <Text bold>Via TUI:</Text></Text>
               <Text>    Import/Export → Browse to .env file → Import</Text>
@@ -172,7 +168,7 @@ export function Docs({ onBack }: DocsProps): React.ReactElement {
               <Text bold>Starting the Daemon:</Text>
               <Text> </Text>
               <Text dimColor>    sk auto          # Auto-init + start (uses keyfile)</Text>
-              <Text dimColor>    sk daemon        # Manual start (prompts for password)</Text>
+              <Text dimColor>    sk daemon        # Start daemon (uses keyfile)</Text>
               <Text dimColor>    sk daemon -g     # Force global daemon</Text>
               <Text> </Text>
               <Text bold>Managing Daemons:</Text>
@@ -231,10 +227,9 @@ export function Docs({ onBack }: DocsProps): React.ReactElement {
             <Box marginTop={1} flexDirection="column">
               <Text bold>When to Reset:</Text>
               <Text> </Text>
-              <Text>  • Forgot your master password (no keyfile)</Text>
-              <Text>  • Vault is corrupted or in a bad state</Text>
-              <Text>  • Want to start fresh with new secrets</Text>
-              <Text>  • Password mismatch errors you can't resolve</Text>
+              <Text>  - Vault is corrupted or in a bad state</Text>
+              <Text>  - Want to start fresh with new secrets</Text>
+              <Text>  - Lost your keyfile</Text>
               <Text> </Text>
               <Text bold color="red">Warning:</Text>
               <Text color="red">  Reset permanently deletes ALL secrets and configs!</Text>
@@ -257,20 +252,16 @@ export function Docs({ onBack }: DocsProps): React.ReactElement {
               <Text bold>Recovery Options:</Text>
               <Text> </Text>
               <Text>  <Text bold>If you have the keyfile:</Text></Text>
-              <Text>    The password is stored in .secret-keeper/.keyfile</Text>
+              <Text>    The key is stored in .secret-keeper/.keyfile</Text>
               <Text>    Just run: sk auto</Text>
-              <Text> </Text>
-              <Text>  <Text bold>If you remember the password:</Text></Text>
-              <Text>    Set it in environment: export SECRET_KEEPER_PASSWORD=xxx</Text>
-              <Text>    Then run: sk daemon</Text>
               <Text> </Text>
               <Text>  <Text bold>If vault was backed up:</Text></Text>
               <Text>    Restore .secret-keeper/ from backup</Text>
-              <Text>    Include both vault.db and .keyfile</Text>
+              <Text>    Include both secrets.db and .keyfile</Text>
               <Text> </Text>
               <Text bold>After Reset:</Text>
               <Text> </Text>
-              <Text>  1. Save the new master key somewhere safe!</Text>
+              <Text>  1. Note the new key is saved to .keyfile</Text>
               <Text>  2. Re-import your secrets: sk add .env</Text>
               <Text>  3. Reconfigure any rotation schedules</Text>
             </Box>
@@ -295,7 +286,7 @@ export function Docs({ onBack }: DocsProps): React.ReactElement {
               <Text dimColor>  sk export             Export (shows values!)</Text>
               <Text> </Text>
               <Text bold>Daemon:</Text>
-              <Text dimColor>  sk daemon             Start daemon (foreground)</Text>
+              <Text dimColor>  sk daemon             Start daemon</Text>
               <Text dimColor>  sk status [-a]        Check daemon status</Text>
               <Text dimColor>  sk stop [-a]          Stop daemon</Text>
               <Text dimColor>  sk exec CMD           Run command with secrets</Text>
@@ -310,7 +301,6 @@ export function Docs({ onBack }: DocsProps): React.ReactElement {
               <Text dimColor>  sk tui                Launch this TUI</Text>
               <Text dimColor>  sk info               Show vault info</Text>
               <Text dimColor>  sk audit              Show audit log</Text>
-              <Text dimColor>  sk change-password    Change master password</Text>
               <Text dimColor>  sk reset [--reinit]   Reset vault completely</Text>
               <Text dimColor>  sk mcp                Start MCP server</Text>
             </Box>

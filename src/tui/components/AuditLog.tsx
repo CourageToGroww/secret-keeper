@@ -18,24 +18,20 @@ function getActionColor(action: string): string {
   return "white";
 }
 
-function getActionEmoji(action: string): string {
+function getActionIcon(action: string): string {
   switch (action) {
     case "VAULT_INITIALIZED":
-      return "🆕";
+      return "[INIT]";
     case "VAULT_UNLOCKED":
-      return "🔓";
-    case "VAULT_LOCKED":
-      return "🔒";
+      return "[OPEN]";
     case "SECRET_ADDED":
-      return "➕";
+      return "[ADD]";
     case "SECRET_DELETED":
-      return "🗑️";
+      return "[DEL]";
     case "SECRETS_EXPORTED":
-      return "📤";
-    case "PASSWORD_CHANGED":
-      return "🔑";
+      return "[EXPORT]";
     default:
-      return "📋";
+      return "[--]";
   }
 }
 
@@ -81,7 +77,7 @@ export function AuditLog({ entries, onBack }: AuditLogProps): React.ReactElement
                 <Text dimColor>{formatTimestamp(entry.timestamp)}</Text>
               </Box>
               <Box width={3}>
-                <Text>{getActionEmoji(entry.action)}</Text>
+                <Text>{getActionIcon(entry.action)}</Text>
               </Box>
               <Box width={20}>
                 <Text color={getActionColor(entry.action) as any}>

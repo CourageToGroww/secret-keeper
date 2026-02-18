@@ -37,25 +37,24 @@ type Screen =
 interface AppProps {
   db: SecretDatabase;
   manager: RotationManager;
-  password: string | null;
 }
 
 const MAIN_MENU_ITEMS: MenuItem[] = [
-  { label: "📦 Manage Secrets", value: "secrets" },
-  { label: "🔄 Daemon Control", value: "daemon" },
-  { label: "📡 Running Daemons", value: "daemon-list" },
-  { label: "📂 All Projects", value: "projects" },
-  { label: "⏰ Rotation Status", value: "rotation-status" },
-  { label: "⚙️  Configure Rotations", value: "rotation-list" },
-  { label: "📜 Rotation History", value: "rotation-history" },
-  { label: "📥 Import / Export", value: "import-export" },
-  { label: "🔐 Vault Settings", value: "vault" },
-  { label: "📋 Audit Log", value: "audit" },
-  { label: "📚 Documentation", value: "docs" },
-  { label: "🚪 Exit", value: "exit" },
+  { label: "Manage Secrets", value: "secrets" },
+  { label: "Daemon Control", value: "daemon" },
+  { label: "Running Daemons", value: "daemon-list" },
+  { label: "All Projects", value: "projects" },
+  { label: "Rotation Status", value: "rotation-status" },
+  { label: "Configure Rotations", value: "rotation-list" },
+  { label: "Rotation History", value: "rotation-history" },
+  { label: "Import / Export", value: "import-export" },
+  { label: "Vault Settings", value: "vault" },
+  { label: "Audit Log", value: "audit" },
+  { label: "Documentation", value: "docs" },
+  { label: "Exit", value: "exit" },
 ];
 
-export function App({ db, manager, password }: AppProps): React.ReactElement {
+export function App({ db, manager }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const [screen, setScreen] = useState<Screen>("menu");
   const [state, actions] = useDatabase(db, manager);
@@ -143,7 +142,7 @@ export function App({ db, manager, password }: AppProps): React.ReactElement {
         justifyContent="center"
       >
         <Text bold color="cyan">
-          🔐 Secret Keeper
+          Secret Keeper
         </Text>
       </Box>
 
@@ -169,7 +168,6 @@ export function App({ db, manager, password }: AppProps): React.ReactElement {
         <DaemonControl
           daemonClient={daemonClient}
           onBack={handleBack}
-          password={password}
           isProjectDaemon={isProjectDaemon}
           socketPath={socketPath}
         />
@@ -236,7 +234,6 @@ export function App({ db, manager, password }: AppProps): React.ReactElement {
           vaultPath={state.vaultPath}
           isLocal={state.isLocal}
           secretCount={state.secretCount}
-          onChangePassword={actions.changePassword}
           onBack={handleBack}
         />
       )}

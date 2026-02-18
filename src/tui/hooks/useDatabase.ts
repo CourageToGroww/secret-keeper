@@ -46,8 +46,6 @@ export interface DatabaseActions {
     providerConfig: ProviderConfig
   ) => Promise<void>;
   
-  // Vault operations
-  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
 }
 
 export function useDatabase(
@@ -180,15 +178,6 @@ export function useDatabase(
     [manager, refresh]
   );
 
-  // Vault operations
-  const changePassword = useCallback(
-    async (currentPassword: string, newPassword: string): Promise<void> => {
-      await db.changePassword(currentPassword, newPassword);
-      refresh();
-    },
-    [db, refresh]
-  );
-
   const actions: DatabaseActions = {
     refresh,
     addSecret,
@@ -203,7 +192,6 @@ export function useDatabase(
     deleteRotationConfig,
     testRotation,
     configureRotation,
-    changePassword,
   };
 
   return [state, actions];

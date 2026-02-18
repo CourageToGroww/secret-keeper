@@ -1,7 +1,6 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
 import SelectInput from "ink-select-input";
-import TextInput from "ink-text-input";
 import Spinner from "ink-spinner";
 import { existsSync, rmSync, mkdirSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
@@ -16,26 +15,20 @@ interface VaultManagerProps {
   vaultPath: string;
   isLocal: boolean;
   secretCount: number;
-  onChangePassword: (current: string, newPass: string) => Promise<void>;
   onBack: () => void;
-  onReset?: () => void; // Called after reset to refresh app state
+  onReset?: () => void;
 }
 
-type Screen = "info" | "change-password" | "reset-confirm" | "reset-complete";
+type Screen = "info" | "reset-confirm" | "reset-complete";
 
 export function VaultManager({
   vaultPath,
   isLocal,
   secretCount,
-  onChangePassword,
   onBack,
   onReset,
 }: VaultManagerProps): React.ReactElement {
   const [screen, setScreen] = useState<Screen>("info");
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [passwordStep, setPasswordStep] = useState<"current" | "new" | "confirm">("current");
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState<{ text: string; color: string } | null>(null);
   const [resetResult, setResetResult] = useState<{ newKey: string; keyFilePath: string } | null>(null);
@@ -45,15 +38,10 @@ export function VaultManager({
       if (screen === "info") {
         onBack();
       } else if (screen === "reset-complete") {
-        // After reset, go back to main menu
         if (onReset) onReset();
         onBack();
       } else {
         setScreen("info");
-        setCurrentPassword("");
-        setNewPassword("");
-        setConfirmPassword("");
-        setPasswordStep("current");
         setMessage(null);
       }
     }
@@ -64,12 +52,11 @@ export function VaultManager({
     setMessage({ text: "Resetting vault...", color: "yellow" });
 
     try {
-      // Determine vault directory
       const vaultDir = isLocal
         ? join(process.cwd(), LOCAL_DB_DIR)
         : join(process.env.HOME || "", ".secret-keeper");
 
-      // Step 1: Stop daemon if running
+      // Stop daemon if running
       const socketPath = isLocal
         ? getProjectSocketPath(process.cwd())
         : DEFAULT_SOCKET_PATH;
@@ -94,7 +81,7 @@ export function VaultManager({
         }
       }
 
-      // Step 2: Remove vault directory
+      // Remove vault directory
       rmSync(vaultDir, { recursive: true, force: true });
 
       if (!reinit) {
@@ -103,23 +90,19 @@ export function VaultManager({
         return;
       }
 
-      // Step 3: Reinitialize
+      // Reinitialize
       setMessage({ text: "Reinitializing vault...", color: "yellow" });
 
-      const password = generateMasterKey();
+      const key = generateMasterKey();
 
-      // Create vault directory
       mkdirSync(vaultDir, { recursive: true, mode: 0o700 });
 
-      // Initialize vault
       const db = new SecretDatabase(undefined, isLocal);
-      await db.initialize(password);
+      await db.initialize(key);
 
-      // Save keyfile
       const keyFilePath = join(vaultDir, ".keyfile");
-      writeFileSync(keyFilePath, password, { mode: 0o600 });
+      writeFileSync(keyFilePath, key, { mode: 0o600 });
 
-      // Create .gitignore for local vaults
       if (isLocal) {
         const gitignorePath = join(vaultDir, ".gitignore");
         writeFileSync(gitignorePath, "*\n");
@@ -155,7 +138,7 @@ export function VaultManager({
         shell: true,
         env: {
           ...process.env,
-          SECRET_KEEPER_PASSWORD: password,
+          SECRET_KEEPER_PASSWORD: key,
           HOME: process.env.HOME || "",
           PATH: process.env.PATH || "",
         },
@@ -168,8 +151,7 @@ export function VaultManager({
 
       db.close();
 
-      // Show success with new key
-      setResetResult({ newKey: password, keyFilePath });
+      setResetResult({ newKey: key, keyFilePath });
       setScreen("reset-complete");
       setMessage(null);
     } catch (error) {
@@ -179,47 +161,6 @@ export function VaultManager({
     setIsLoading(false);
   };
 
-  const handlePasswordSubmit = async () => {
-    if (passwordStep === "current") {
-      if (currentPassword.length >= 8) {
-        setPasswordStep("new");
-      } else {
-        setMessage({ text: "Password must be at least 8 characters", color: "red" });
-      }
-      return;
-    }
-
-    if (passwordStep === "new") {
-      if (newPassword.length >= 8) {
-        setPasswordStep("confirm");
-      } else {
-        setMessage({ text: "Password must be at least 8 characters", color: "red" });
-      }
-      return;
-    }
-
-    if (passwordStep === "confirm") {
-      if (confirmPassword !== newPassword) {
-        setMessage({ text: "Passwords do not match", color: "red" });
-        return;
-      }
-
-      setIsLoading(true);
-      try {
-        await onChangePassword(currentPassword, newPassword);
-        setMessage({ text: "Password changed successfully!", color: "green" });
-        setScreen("info");
-        setCurrentPassword("");
-        setNewPassword("");
-        setConfirmPassword("");
-        setPasswordStep("current");
-      } catch (error) {
-        setMessage({ text: `Error: ${error}`, color: "red" });
-      }
-      setIsLoading(false);
-    }
-  };
-
   if (isLoading) {
     return (
       <Box flexDirection="column" paddingX={1}>
@@ -227,7 +168,7 @@ export function VaultManager({
           <Text color="green">
             <Spinner type="dots" />
           </Text>
-          <Text> Changing password (re-encrypting all secrets)...</Text>
+          <Text> Working...</Text>
         </Box>
       </Box>
     );
@@ -237,22 +178,22 @@ export function VaultManager({
     return (
       <Box flexDirection="column" paddingX={1}>
         <Text bold color="green">
-          ✓ Vault Reset Complete
+          Vault Reset Complete
         </Text>
 
         <Box marginTop={1} flexDirection="column" borderStyle="single" borderColor="yellow" paddingX={1}>
           <Text bold color="yellow">
-            YOUR NEW MASTER KEY (save this somewhere safe!):
+            YOUR NEW ENCRYPTION KEY (saved to keyfile):
           </Text>
           <Text> </Text>
           <Text bold color="cyan">{resetResult.newKey}</Text>
           <Text> </Text>
-          <Text dimColor>Also saved to: {resetResult.keyFilePath}</Text>
+          <Text dimColor>Keyfile: {resetResult.keyFilePath}</Text>
         </Box>
 
         <Box marginTop={1} flexDirection="column">
-          <Text color="green">✓ Vault reinitialized</Text>
-          <Text color="green">✓ Daemon started</Text>
+          <Text color="green">Vault reinitialized</Text>
+          <Text color="green">Daemon started</Text>
         </Box>
 
         <Box marginTop={1}>
@@ -266,15 +207,15 @@ export function VaultManager({
     return (
       <Box flexDirection="column" paddingX={1}>
         <Text bold color="red">
-          ⚠️  Reset Vault
+          Reset Vault
         </Text>
 
         <Box marginTop={1} flexDirection="column" borderStyle="single" borderColor="red" paddingX={1}>
           <Text color="red" bold>WARNING: This will permanently delete:</Text>
           <Text> </Text>
-          <Text>  • All {secretCount} stored secrets</Text>
-          <Text>  • All rotation configurations</Text>
-          <Text>  • All audit history</Text>
+          <Text>  - All {secretCount} stored secrets</Text>
+          <Text>  - All rotation configurations</Text>
+          <Text>  - All audit history</Text>
           <Text> </Text>
           <Text color="yellow">Vault: {vaultPath}</Text>
         </Box>
@@ -293,9 +234,9 @@ export function VaultManager({
           ) : (
             <SelectInput
               items={[
-                { label: "🔄 Reset & Reinitialize (generates new key)", value: "reset-reinit" },
-                { label: "🗑️  Reset Only (delete vault)", value: "reset-only" },
-                { label: "← Cancel", value: "cancel" },
+                { label: "Reset & Reinitialize (generates new key)", value: "reset-reinit" },
+                { label: "Reset Only (delete vault)", value: "reset-only" },
+                { label: "Cancel", value: "cancel" },
               ]}
               onSelect={(item) => {
                 if (item.value === "reset-reinit") {
@@ -309,67 +250,6 @@ export function VaultManager({
               }}
             />
           )}
-        </Box>
-      </Box>
-    );
-  }
-
-  if (screen === "change-password") {
-    return (
-      <Box flexDirection="column" paddingX={1}>
-        <Text bold color="cyan">
-          Change Master Password
-        </Text>
-
-        {message && (
-          <Box marginY={1}>
-            <Text color={message.color as any}>{message.text}</Text>
-          </Box>
-        )}
-
-        <Box marginTop={1} flexDirection="column">
-          {passwordStep === "current" && (
-            <>
-              <Text>Current password:</Text>
-              <TextInput
-                value={currentPassword}
-                onChange={setCurrentPassword}
-                onSubmit={handlePasswordSubmit}
-                mask="*"
-              />
-            </>
-          )}
-
-          {passwordStep === "new" && (
-            <>
-              <Text dimColor>Current password: ********</Text>
-              <Text>New password (min 8 characters):</Text>
-              <TextInput
-                value={newPassword}
-                onChange={setNewPassword}
-                onSubmit={handlePasswordSubmit}
-                mask="*"
-              />
-            </>
-          )}
-
-          {passwordStep === "confirm" && (
-            <>
-              <Text dimColor>Current password: ********</Text>
-              <Text dimColor>New password: ********</Text>
-              <Text>Confirm new password:</Text>
-              <TextInput
-                value={confirmPassword}
-                onChange={setConfirmPassword}
-                onSubmit={handlePasswordSubmit}
-                mask="*"
-              />
-            </>
-          )}
-        </Box>
-
-        <Box marginTop={1}>
-          <Text dimColor>Press Enter to continue, Escape to cancel</Text>
         </Box>
       </Box>
     );
@@ -403,15 +283,12 @@ export function VaultManager({
       <Box marginTop={1}>
         <SelectInput
           items={[
-            { label: "🔑 Change Master Password", value: "change-password" },
-            { label: "🔄 Reset Vault", value: "reset" },
-            { label: "← Back", value: "back" },
+            { label: "Reset Vault", value: "reset" },
+            { label: "Back", value: "back" },
           ]}
           onSelect={(item) => {
             setMessage(null);
-            if (item.value === "change-password") {
-              setScreen("change-password");
-            } else if (item.value === "reset") {
+            if (item.value === "reset") {
               setScreen("reset-confirm");
             } else {
               onBack();

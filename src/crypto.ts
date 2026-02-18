@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "crypto";
+import { randomBytes } from "crypto";
 import { unlink } from "fs/promises";
 import { stat, open } from "fs/promises";
 import {
@@ -6,7 +6,6 @@ import {
   NONCE_SIZE,
   KEY_SIZE,
   ITERATIONS,
-  PASSWORD_HASH_PREFIX,
   CryptoError,
   DecryptionError,
 } from "./types";
@@ -111,33 +110,6 @@ export async function decrypt(encryptedData: string, password: string): Promise<
     }
     throw new DecryptionError();
   }
-}
-
-// ============================================================================
-// Password Hashing
-// ============================================================================
-
-/**
- * Hash a password for storage (simple SHA-256 with prefix)
- */
-export function hashPassword(password: string): string {
-  const prefixed = PASSWORD_HASH_PREFIX + password;
-  return createHash("sha256").update(prefixed).digest("hex");
-}
-
-/**
- * Verify a password against stored hash using constant-time comparison
- */
-export function verifyPassword(password: string, storedHash: string): boolean {
-  const computedHash = hashPassword(password);
-  const storedBuffer = Buffer.from(storedHash, "hex");
-  const computedBuffer = Buffer.from(computedHash, "hex");
-
-  if (storedBuffer.length !== computedBuffer.length) {
-    return false;
-  }
-
-  return timingSafeEqual(storedBuffer, computedBuffer);
 }
 
 // ============================================================================

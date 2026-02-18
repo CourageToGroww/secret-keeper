@@ -12,7 +12,6 @@ import { findProjectSocketPath, DEFAULT_SOCKET_PATH } from "../../types";
 interface DaemonControlProps {
   onBack: () => void;
   daemonClient: DaemonClient;
-  password: string | null;
   isProjectDaemon?: boolean;
   socketPath?: string;
 }
@@ -26,7 +25,6 @@ interface DaemonStatus {
 export function DaemonControl({
   onBack,
   daemonClient,
-  password,
   isProjectDaemon = false,
   socketPath = DEFAULT_SOCKET_PATH,
 }: DaemonControlProps): React.ReactElement {
@@ -100,25 +98,28 @@ export function DaemonControl({
     setMessage({ text: "Starting daemon...", color: "yellow" });
 
     try {
-      // Try to get password from prop, keyfile, or env
-      let daemonPassword = password;
+      // Load key from keyfile or env
+      let daemonKey: string | undefined;
 
-      if (!daemonPassword) {
-        // Try to read from keyfile
-        const vaultDir = isProjectDaemon
-          ? `${process.cwd()}/.secret-keeper`
-          : `${process.env.HOME}/.secret-keeper`;
-        const keyfilePath = `${vaultDir}/.keyfile`;
+      // Try keyfile
+      const vaultDir = isProjectDaemon
+        ? `${process.cwd()}/.secret-keeper`
+        : `${process.env.HOME}/.secret-keeper`;
+      const keyfilePath = `${vaultDir}/.keyfile`;
 
-        if (existsSync(keyfilePath)) {
-          const { readFileSync } = await import("fs");
-          daemonPassword = readFileSync(keyfilePath, "utf-8").trim();
-        }
+      if (existsSync(keyfilePath)) {
+        const { readFileSync } = await import("fs");
+        daemonKey = readFileSync(keyfilePath, "utf-8").trim();
       }
 
-      if (!daemonPassword) {
+      // Fall back to env
+      if (!daemonKey) {
+        daemonKey = process.env.SECRET_KEEPER_PASSWORD;
+      }
+
+      if (!daemonKey) {
         setMessage({
-          text: "No password available. Run 'sk auto' or start daemon from CLI.",
+          text: "No keyfile found. Run 'sk auto' or start daemon from CLI.",
           color: "red",
         });
         setIsLoading(false);
@@ -158,7 +159,7 @@ export function DaemonControl({
         shell: true,
         env: {
           ...process.env,
-          SECRET_KEEPER_PASSWORD: daemonPassword,
+          SECRET_KEEPER_PASSWORD: daemonKey,
           HOME: process.env.HOME || "",
           PATH: process.env.PATH || "",
         },
@@ -258,14 +259,14 @@ export function DaemonControl({
         <Box marginTop={1}>
           <SelectInput
             items={[
-              { label: "▶️  Start Daemon", value: "start" },
+              { label: "Start Daemon", value: "start" },
               {
                 label: enableRotation
-                  ? "🔄 Disable Auto-Rotation"
-                  : "🔄 Enable Auto-Rotation",
+                  ? "Disable Auto-Rotation"
+                  : "Enable Auto-Rotation",
                 value: "toggle-rotation",
               },
-              { label: "← Cancel", value: "cancel" },
+              { label: "Cancel", value: "cancel" },
             ]}
             onSelect={(item) => {
               if (item.value === "start") {
@@ -340,14 +341,14 @@ export function DaemonControl({
           items={
             status?.running
               ? [
-                  { label: "⏹️  Stop Daemon", value: "stop" },
-                  { label: "🔄 Refresh Status", value: "refresh" },
-                  { label: "← Back", value: "back" },
+                  { label: "Stop Daemon", value: "stop" },
+                  { label: "Refresh Status", value: "refresh" },
+                  { label: "Back", value: "back" },
                 ]
               : [
-                  { label: "▶️  Start Daemon", value: "start" },
-                  { label: "🔄 Refresh Status", value: "refresh" },
-                  { label: "← Back", value: "back" },
+                  { label: "Start Daemon", value: "start" },
+                  { label: "Refresh Status", value: "refresh" },
+                  { label: "Back", value: "back" },
                 ]
           }
           onSelect={(item) => {

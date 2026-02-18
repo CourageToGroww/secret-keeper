@@ -11,15 +11,13 @@ import {
   AuditEntry,
   AuditAction,
   VaultNotInitializedError,
-  VaultLockedError,
   SecretNotFoundError,
-  InvalidPasswordError,
   RotationConfig,
   RotationHistoryEntry,
   ProviderConfig,
   ProviderType,
 } from "./types";
-import { encrypt, decrypt, hashPassword, verifyPassword } from "./crypto";
+import { encrypt, decrypt } from "./crypto";
 
 // ============================================================================
 // SQL Schema
@@ -82,7 +80,7 @@ const SCHEMA = {
 export class SecretDatabase {
   private db!: Database;
   private dbPath: string;
-  private masterPassword: string | null = null;
+  private encryptionKey: string | null = null;
 
   constructor(projectPath?: string, forceLocal: boolean = false) {
     this.dbPath = this.resolveDatabasePath(projectPath, forceLocal);
@@ -142,7 +140,7 @@ export class SecretDatabase {
       this.db.close();
       this.db = null!;
     }
-    this.masterPassword = null;
+    this.encryptionKey = null;
   }
 
   // ============================================================================
@@ -157,9 +155,9 @@ export class SecretDatabase {
   }
 
   /**
-   * Initialize a new vault with the given master password
+   * Initialize a new vault with the given encryption key
    */
-  async initialize(masterPassword: string): Promise<boolean> {
+  async initialize(encryptionKey: string): Promise<boolean> {
     // Create directory if needed
     const dbDir = dirname(this.dbPath);
     await mkdir(dbDir, { recursive: true, mode: 0o700 });
@@ -177,69 +175,47 @@ export class SecretDatabase {
     this.db.exec(SCHEMA.rotationConfig);
     this.db.exec(SCHEMA.rotationHistory);
 
-    // Store password hash and metadata
-    const pwHash = hashPassword(masterPassword);
+    // Store metadata (no password hash)
     const now = new Date().toISOString();
 
     const insert = this.db.prepare(
       "INSERT INTO vault_config (key, value) VALUES (?, ?)"
     );
-    insert.run("password_hash", pwHash);
     insert.run("created_at", now);
-    insert.run("version", "1");
+    insert.run("version", "2");
 
-    this.masterPassword = masterPassword;
+    this.encryptionKey = encryptionKey;
     this.logAudit("VAULT_INITIALIZED");
 
     return true;
   }
 
   /**
-   * Unlock the vault with the master password
+   * Load the encryption key for vault operations
    */
-  async unlock(masterPassword: string): Promise<boolean> {
+  loadKey(encryptionKey: string): void {
     if (!this.isInitialized()) {
       throw new VaultNotInitializedError();
     }
 
     this.open();
-
-    const row = this.db
-      .prepare("SELECT value FROM vault_config WHERE key = ?")
-      .get("password_hash") as { value: string } | null;
-
-    if (!row || !verifyPassword(masterPassword, row.value)) {
-      throw new InvalidPasswordError();
-    }
-
-    this.masterPassword = masterPassword;
+    this.encryptionKey = encryptionKey;
     this.logAudit("VAULT_UNLOCKED");
-    return true;
   }
 
   /**
-   * Lock the vault (clear master password from memory)
-   */
-  lock(): void {
-    if (this.masterPassword) {
-      this.logAudit("VAULT_LOCKED");
-    }
-    this.masterPassword = null;
-  }
-
-  /**
-   * Check if the vault is unlocked
+   * Check if the vault has a key loaded
    */
   isUnlocked(): boolean {
-    return this.masterPassword !== null;
+    return this.encryptionKey !== null;
   }
 
   /**
-   * Ensure vault is unlocked before operations
+   * Ensure vault has a key loaded before operations
    */
   private ensureUnlocked(): void {
-    if (!this.masterPassword) {
-      throw new VaultLockedError();
+    if (!this.encryptionKey) {
+      throw new VaultNotInitializedError();
     }
   }
 
@@ -258,7 +234,7 @@ export class SecretDatabase {
     this.ensureUnlocked();
     this.migrateSensitiveColumn();
 
-    const encryptedValue = await encrypt(value, this.masterPassword!);
+    const encryptedValue = await encrypt(value, this.encryptionKey!);
     const now = new Date().toISOString();
     const tags = options.tags ? JSON.stringify(options.tags) : null;
     const sensitive = options.sensitive !== false ? 1 : 0;  // default to sensitive
@@ -293,7 +269,7 @@ export class SecretDatabase {
       throw new SecretNotFoundError(name);
     }
 
-    return decrypt(row.encrypted_value, this.masterPassword!);
+    return decrypt(row.encrypted_value, this.encryptionKey!);
   }
 
   /**
@@ -308,7 +284,7 @@ export class SecretDatabase {
 
     const secrets: Record<string, string> = {};
     for (const row of rows) {
-      secrets[row.name] = await decrypt(row.encrypted_value, this.masterPassword!);
+      secrets[row.name] = await decrypt(row.encrypted_value, this.encryptionKey!);
     }
 
     return secrets;
@@ -476,43 +452,6 @@ export class SecretDatabase {
     }
 
     return { secrets, credentials, skipped };
-  }
-
-  // ============================================================================
-  // Password Management
-  // ============================================================================
-
-  /**
-   * Change the master password (re-encrypts all secrets)
-   */
-  async changePassword(
-    currentPassword: string,
-    newPassword: string
-  ): Promise<boolean> {
-    // Verify current password
-    await this.unlock(currentPassword);
-
-    // Get all secrets decrypted
-    const secrets = await this.getAllSecrets();
-
-    // Update password hash
-    const newHash = hashPassword(newPassword);
-    this.db
-      .prepare("UPDATE vault_config SET value = ? WHERE key = ?")
-      .run(newHash, "password_hash");
-
-    // Re-encrypt all secrets with new password
-    this.masterPassword = newPassword;
-    for (const [name, value] of Object.entries(secrets)) {
-      const encryptedValue = await encrypt(value, newPassword);
-      const now = new Date().toISOString();
-      this.db
-        .prepare("UPDATE secrets SET encrypted_value = ?, updated_at = ? WHERE name = ?")
-        .run(encryptedValue, now, name);
-    }
-
-    this.logAudit("PASSWORD_CHANGED");
-    return true;
   }
 
   // ============================================================================

@@ -44,67 +44,55 @@ function table(
 }
 
 // ============================================================================
-// Password Prompt
+// Key Management
 // ============================================================================
 
-async function getPassword(prompt: string = "Password: "): Promise<string> {
-  return new Promise((resolve) => {
-    process.stdout.write(prompt);
-    let password = "";
-    
-    // Save terminal state and disable echo
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-    }
-    process.stdin.resume();
+const KEY_FILE_NAME = ".keyfile";
 
-    const onData = (char: Buffer) => {
-      const c = char.toString();
-
-      if (c === "\n" || c === "\r" || c === "\u0004") {
-        cleanup();
-        process.stdout.write("\n");
-        resolve(password);
-      } else if (c === "\u0003") {
-        // Ctrl+C
-        cleanup();
-        process.stdout.write("\n");
-        process.exit(1);
-      } else if (c === "\u007F" || c === "\b") {
-        // Backspace
-        if (password.length > 0) {
-          password = password.slice(0, -1);
-          process.stdout.write("\b \b");
-        }
-      } else if (c.charCodeAt(0) >= 32) {
-        // Only accept printable characters
-        password += c;
-        process.stdout.write("*");
-      }
-    };
-
-    const cleanup = () => {
-      process.stdin.removeListener("data", onData);
-      if (process.stdin.isTTY) {
-        process.stdin.setRawMode(false);
-      }
-      process.stdin.pause();
-    };
-
-    process.stdin.on("data", onData);
-  });
+/**
+ * Get the keyfile path for a database instance
+ */
+function getKeyFilePath(db: SecretDatabase): string {
+  const vaultDir = db.isLocal()
+    ? join(process.cwd(), LOCAL_DB_DIR)
+    : join(process.env.HOME || "", ".secret-keeper");
+  return join(vaultDir, KEY_FILE_NAME);
 }
 
-async function getPasswordWithConfirm(prompt: string = "Password: "): Promise<string> {
-  const password = await getPassword(prompt);
-  const confirm = await getPassword("Confirm password: ");
-
-  if (password !== confirm) {
-    log.error("Passwords do not match.");
-    process.exit(1);
+/**
+ * Load encryption key from environment variable or keyfile.
+ * Exits with error if no key is found.
+ */
+function loadKey(db: SecretDatabase): string {
+  // 1. Check environment variable
+  if (process.env.SECRET_KEEPER_PASSWORD) {
+    return process.env.SECRET_KEEPER_PASSWORD;
   }
 
-  return password;
+  // 2. Check keyfile
+  const keyFilePath = getKeyFilePath(db);
+  if (existsSync(keyFilePath)) {
+    return readFileSync(keyFilePath, "utf-8").trim();
+  }
+
+  log.error("No encryption key found.");
+  log.dim(`Expected keyfile at: ${keyFilePath}`);
+  log.dim("Or set SECRET_KEEPER_PASSWORD environment variable.");
+  log.dim("Run 'sk auto' to create a new vault with an auto-generated key.");
+  process.exit(1);
+}
+
+/**
+ * Initialize a database with key loaded and ready to use
+ */
+function openVault(db: SecretDatabase): string {
+  if (!db.isInitialized()) {
+    log.error("Vault not initialized. Run 'sk init' or 'sk auto' first.");
+    process.exit(1);
+  }
+  const key = loadKey(db);
+  db.loadKey(key);
+  return key;
 }
 
 async function confirm(message: string): Promise<boolean> {
@@ -204,36 +192,12 @@ async function promptMcpSetup(): Promise<void> {
   }
 }
 
-/**
- * Get password from env var, keyfile, or prompt.
- * Automatically checks keyfile locations based on vault type.
- */
-async function getPasswordAuto(db: SecretDatabase): Promise<string> {
-  // 1. Check environment variable
-  if (process.env.SECRET_KEEPER_PASSWORD) {
-    return process.env.SECRET_KEEPER_PASSWORD;
-  }
-
-  // 2. Check keyfile based on vault location
-  const vaultDir = db.isLocal()
-    ? join(process.cwd(), LOCAL_DB_DIR)
-    : join(process.env.HOME || "", ".secret-keeper");
-  const keyFilePath = join(vaultDir, ".keyfile");
-
-  if (existsSync(keyFilePath)) {
-    return readFileSync(keyFilePath, "utf-8").trim();
-  }
-
-  // 3. Fall back to prompt
-  return getPassword("Master password: ");
-}
-
 // ============================================================================
 // CLI Program
 // ============================================================================
 
 export const program = new Command()
-  .name("secret-keeper")
+  .name("sk")
   .description("Secure secret management for Claude Code and AI assistants")
   .version("1.0.0");
 
@@ -243,9 +207,8 @@ export const program = new Command()
 
 program
   .command("init")
-  .description("Initialize a new secret vault")
+  .description("Initialize a new secret vault with auto-generated key")
   .option("-l, --local", "Initialize a project-local vault")
-  .option("-g, --generate-key", "Generate a random master key")
   .action(async (options) => {
     const db = new SecretDatabase(undefined, options.local);
 
@@ -254,29 +217,16 @@ program
       process.exit(1);
     }
 
-    let password: string;
+    // Always generate key automatically
+    const key = generateMasterKey();
 
-    if (options.generateKey) {
-      password = generateMasterKey();
-      log.warning("Generated master key (SAVE THIS - it will not be shown again):");
-      console.log(chalk.bold.cyan(password));
-      console.log();
+    await db.initialize(key);
 
-      const confirmed = await confirm("Have you saved this key?");
-      if (!confirmed) {
-        log.error("Aborted. Please save the key before continuing.");
-        process.exit(1);
-      }
-    } else {
-      password = await getPasswordWithConfirm("Master password: ");
+    // Save keyfile
+    const vaultDir = dirname(db.getPath());
+    const keyFilePath = join(vaultDir, KEY_FILE_NAME);
+    writeFileSync(keyFilePath, key, { mode: 0o600 });
 
-      if (password.length < 8) {
-        log.error("Password must be at least 8 characters.");
-        process.exit(1);
-      }
-    }
-
-    await db.initialize(password);
     log.success(`Vault initialized at ${db.getPath()}`);
 
     // Create .gitignore for local vaults
@@ -285,6 +235,13 @@ program
       writeFileSync(gitignorePath, "*\n");
       log.dim("Created .gitignore to protect vault");
     }
+
+    // Show the key
+    console.log();
+    log.warning("YOUR ENCRYPTION KEY (save this somewhere safe!):");
+    console.log(chalk.bold.yellow(`  ${key}`));
+    console.log();
+    log.dim("This key is also saved in: " + keyFilePath);
   });
 
 // ============================================================================
@@ -306,13 +263,7 @@ program
     }
 
     const db = new SecretDatabase();
-    if (!db.isInitialized()) {
-      log.error("Vault not initialized. Run 'secret-keeper init' first.");
-      process.exit(1);
-    }
-
-    const password = await getPasswordAuto(db);
-    await db.unlock(password);
+    openVault(db);
 
     const content = readFileSync(envFile, "utf-8");
     const secretsOnly = options.secretsOnly ?? false;
@@ -355,23 +306,20 @@ program
 
 program
   .command("set")
-  .description("Set a single secret")
+  .description("Set a single secret value")
   .argument("<name>", "Name of the secret")
-  .option("-v, --value <value>", "Secret value (will prompt if not provided)")
+  .option("-v, --value <value>", "Secret value (required)")
   .option("-d, --description <desc>", "Description of the secret")
   .action(async (name, options) => {
-    const db = new SecretDatabase();
-    if (!db.isInitialized()) {
-      log.error("Vault not initialized. Run 'secret-keeper init' first.");
+    if (!options.value) {
+      log.error("Value is required. Use: sk set NAME -v VALUE");
       process.exit(1);
     }
 
-    const password =
-      await getPasswordAuto(db);
-    await db.unlock(password);
+    const db = new SecretDatabase();
+    openVault(db);
 
-    const value = options.value || (await getPassword("Secret value: "));
-    await db.addSecret(name, value, { description: options.description });
+    await db.addSecret(name, options.value, { description: options.description });
 
     log.success(`Secret '${name}' saved.`);
     db.close();
@@ -387,7 +335,7 @@ program
   .action(async () => {
     const db = new SecretDatabase();
     if (!db.isInitialized()) {
-      log.error("Vault not initialized. Run 'secret-keeper init' first.");
+      log.error("Vault not initialized. Run 'sk init' first.");
       process.exit(1);
     }
 
@@ -421,15 +369,11 @@ program
 
 program
   .command("delete")
-  .description("Delete a secret")
+  .description("Delete a secret from the vault")
   .argument("<name>", "Name of the secret to delete")
   .option("-y, --confirm", "Skip confirmation prompt")
   .action(async (name, options) => {
     const db = new SecretDatabase();
-    if (!db.isInitialized()) {
-      log.error("Vault not initialized.");
-      process.exit(1);
-    }
 
     if (!options.confirm) {
       const confirmed = await confirm(`Delete secret '${name}'?`);
@@ -439,9 +383,7 @@ program
       }
     }
 
-    const password =
-      await getPasswordAuto(db);
-    await db.unlock(password);
+    openVault(db);
     await db.deleteSecret(name);
 
     log.success(`Secret '${name}' deleted.`);
@@ -454,19 +396,12 @@ program
 
 program
   .command("run")
-  .description("Run a command with secrets injected as environment variables")
+  .description("Run a command with secrets as environment variables (no daemon)")
   .argument("<command...>", "Command to execute")
   .option("-n, --names <names>", "Comma-separated list of secrets to inject")
   .action(async (commandParts, options) => {
     const db = new SecretDatabase();
-    if (!db.isInitialized()) {
-      log.error("Vault not initialized.");
-      process.exit(1);
-    }
-
-    const password =
-      await getPasswordAuto(db);
-    await db.unlock(password);
+    openVault(db);
 
     let secrets = await db.getAllSecrets();
 
@@ -497,19 +432,12 @@ program
 
 program
   .command("export")
-  .description("Export secrets (WARNING: shows actual values)")
+  .description("Export secrets in shell, docker, or json format")
   .option("-f, --format <format>", "Output format: shell, docker, json", "shell")
   .option("-n, --names <names>", "Comma-separated list of secrets to export")
   .action(async (options) => {
     const db = new SecretDatabase();
-    if (!db.isInitialized()) {
-      log.error("Vault not initialized.");
-      process.exit(1);
-    }
-
-    const password =
-      await getPasswordAuto(db);
-    await db.unlock(password);
+    openVault(db);
 
     let secrets = await db.getAllSecrets();
 
@@ -587,39 +515,12 @@ program
   });
 
 // ============================================================================
-// change-password - Change master password
-// ============================================================================
-
-program
-  .command("change-password")
-  .description("Change the master password")
-  .action(async () => {
-    const db = new SecretDatabase();
-    if (!db.isInitialized()) {
-      log.error("Vault not initialized.");
-      process.exit(1);
-    }
-
-    const currentPassword = await getPassword("Current password: ");
-    const newPassword = await getPasswordWithConfirm("New password: ");
-
-    if (newPassword.length < 8) {
-      log.error("Password must be at least 8 characters.");
-      process.exit(1);
-    }
-
-    await db.changePassword(currentPassword, newPassword);
-    log.success("Password changed successfully.");
-    db.close();
-  });
-
-// ============================================================================
 // install - Install into a project
 // ============================================================================
 
 program
   .command("install")
-  .description("Install Secret Keeper into a project with automatic daemon startup")
+  .description("Install Secret Keeper into a project directory")
   .argument("[project-path]", "Path to project directory", ".")
   .option("--direnv", "Create .envrc for direnv integration")
   .option("--shell", "Show shell integration instructions")
@@ -710,11 +611,11 @@ sk_auto
 
     console.log();
     log.info("Next steps:");
-    log.dim("  1. secret-keeper auto         # Initialize vault and start daemon");
-    log.dim("  2. secret-keeper add .env     # Import your secrets");
-    log.dim("  3. secret-keeper exec <cmd>   # Run commands with secrets");
+    log.dim("  1. sk auto              # Initialize vault and start daemon");
+    log.dim("  2. sk add .env          # Import your secrets");
+    log.dim("  3. sk exec <cmd>        # Run commands with secrets");
     console.log();
-    log.dim("For automatic startup, run: secret-keeper install --shell");
+    log.dim("For automatic startup, run: sk install --shell");
     log.dim("Then add the snippet to your ~/.zshrc or ~/.bashrc");
   });
 
@@ -724,13 +625,13 @@ sk_auto
 
 program
   .command("info")
-  .description("Show vault information")
+  .description("Show vault location, type, and secret count")
   .action(async () => {
     const vaultPath = findVaultPath();
 
     if (!vaultPath) {
       log.warning("No vault found.");
-      log.dim("Run 'secret-keeper init' to create one.");
+      log.dim("Run 'sk init' to create one.");
       return;
     }
 
@@ -751,7 +652,7 @@ program
 
 program
   .command("daemon")
-  .description("Start the secure daemon")
+  .description("Start the secure daemon (holds secrets in memory)")
   .option("-f, --foreground", "Run in foreground")
   .option("-p, --project <path>", "Project directory (auto-detects local vault)")
   .option("-g, --global", "Force global daemon (ignore local vault)")
@@ -781,14 +682,7 @@ program
       }
     }
 
-    if (!db.isInitialized()) {
-      log.error("Vault not initialized.");
-      process.exit(1);
-    }
-
-    const password =
-      await getPasswordAuto(db);
-    await db.unlock(password);
+    const key = openVault(db);
 
     const daemon = new SecretKeeperDaemon(socketPath);
     await daemon.loadSecrets(db);
@@ -818,7 +712,7 @@ program
 
 program
   .command("exec")
-  .description("Execute a command via the secure daemon")
+  .description("Execute a command via the daemon with output scrubbing")
   .argument("<command...>", "Command to execute")
   .option("-t, --timeout <seconds>", "Command timeout", "300")
   .option("-g, --global", "Use global daemon")
@@ -829,7 +723,7 @@ program
 
     if (!client.isRunning()) {
       const isProject = socketPath !== DEFAULT_SOCKET_PATH;
-      log.error(`Daemon not running${isProject ? " (project)" : ""}. Start it with 'secret-keeper daemon'.`);
+      log.error(`Daemon not running${isProject ? " (project)" : ""}. Start it with 'sk daemon'.`);
       process.exit(1);
     }
 
@@ -860,7 +754,7 @@ program
 
 program
   .command("status")
-  .description("Check daemon status")
+  .description("Check if the daemon is running and how many secrets are loaded")
   .option("-g, --global", "Check global daemon only")
   .option("-a, --all", "Check all running daemons")
   .action(async (options) => {
@@ -909,7 +803,7 @@ program
 
     if (!client.isRunning()) {
       log.warning(`Daemon not running${isProject ? " (project)" : ""}.`);
-      log.dim("Start it with 'secret-keeper daemon'");
+      log.dim("Start it with 'sk daemon'");
       process.exit(1);
     }
 
@@ -935,7 +829,7 @@ program
 
 program
   .command("stop")
-  .description("Stop the daemon")
+  .description("Stop the running daemon")
   .option("-g, --global", "Stop global daemon only")
   .option("-a, --all", "Stop all running daemons")
   .action(async (options) => {
@@ -1002,35 +896,25 @@ program
 
 program
   .command("tui")
-  .description("Launch interactive TUI")
+  .description("Launch interactive terminal UI")
   .action(async () => {
     const db = new SecretDatabase();
 
-    // Try to get password from env or keyfile (no prompt)
-    let password: string | null = null;
+    // Try to load key from env or keyfile (no prompt)
+    let key: string | null = null;
 
     if (process.env.SECRET_KEEPER_PASSWORD) {
-      password = process.env.SECRET_KEEPER_PASSWORD;
+      key = process.env.SECRET_KEEPER_PASSWORD;
     } else {
-      // Try to load from keyfile
-      const vaultDir = db.isLocal()
-        ? join(process.cwd(), LOCAL_DB_DIR)
-        : join(process.env.HOME || "", ".secret-keeper");
-      const keyFilePath = join(vaultDir, ".keyfile");
-
+      const keyFilePath = getKeyFilePath(db);
       if (existsSync(keyFilePath)) {
-        password = readFileSync(keyFilePath, "utf-8").trim();
+        key = readFileSync(keyFilePath, "utf-8").trim();
       }
     }
 
-    // If we have a password and vault is initialized, unlock
-    if (password && db.isInitialized()) {
-      try {
-        await db.unlock(password);
-      } catch {
-        // Invalid password, will prompt in TUI if needed
-        password = null;
-      }
+    // If we have a key and vault is initialized, load it
+    if (key && db.isInitialized()) {
+      db.loadKey(key);
     }
 
     // Completely reset stdin state before launching TUI
@@ -1046,7 +930,7 @@ program
     process.stdin.resume();
     process.stdin.setEncoding('utf8');
 
-    await launchTUI(db, password);
+    await launchTUI(db);
     db.close();
   });
 
@@ -1056,7 +940,7 @@ program
 
 const rotationCommand = program
   .command("rotation")
-  .description("Manage secret rotation");
+  .description("Manage automatic secret rotation");
 
 // rotation list
 rotationCommand
@@ -1064,14 +948,7 @@ rotationCommand
   .description("List rotation configurations")
   .action(async () => {
     const db = new SecretDatabase();
-    if (!db.isInitialized()) {
-      log.error("Vault not initialized.");
-      process.exit(1);
-    }
-
-    const password =
-      await getPasswordAuto(db);
-    await db.unlock(password);
+    openVault(db);
 
     const manager = new RotationManager(db);
     const configs = manager.listRotationConfigs();
@@ -1113,14 +990,7 @@ rotationCommand
   .option("--access-key-id <name>", "Access key ID secret name (for AWS)")
   .action(async (secretName, provider, options) => {
     const db = new SecretDatabase();
-    if (!db.isInitialized()) {
-      log.error("Vault not initialized.");
-      process.exit(1);
-    }
-
-    const password =
-      await getPasswordAuto(db);
-    await db.unlock(password);
+    openVault(db);
 
     // Validate provider type
     const validProviders: ProviderType[] = ["custom", "openai", "aws", "github"];
@@ -1187,14 +1057,7 @@ rotationCommand
   .argument("<secret>", "Name of the secret")
   .action(async (secretName) => {
     const db = new SecretDatabase();
-    if (!db.isInitialized()) {
-      log.error("Vault not initialized.");
-      process.exit(1);
-    }
-
-    const password =
-      await getPasswordAuto(db);
-    await db.unlock(password);
+    openVault(db);
 
     const manager = new RotationManager(db);
     manager.enableRotation(secretName);
@@ -1210,14 +1073,7 @@ rotationCommand
   .argument("<secret>", "Name of the secret")
   .action(async (secretName) => {
     const db = new SecretDatabase();
-    if (!db.isInitialized()) {
-      log.error("Vault not initialized.");
-      process.exit(1);
-    }
-
-    const password =
-      await getPasswordAuto(db);
-    await db.unlock(password);
+    openVault(db);
 
     const manager = new RotationManager(db);
     manager.disableRotation(secretName);
@@ -1233,17 +1089,10 @@ rotationCommand
   .argument("<secret>", "Name of the secret")
   .action(async (secretName) => {
     const db = new SecretDatabase();
-    if (!db.isInitialized()) {
-      log.error("Vault not initialized.");
-      process.exit(1);
-    }
-
-    const password =
-      await getPasswordAuto(db);
-    await db.unlock(password);
+    openVault(db);
 
     const manager = new RotationManager(db);
-    
+
     log.info(`Rotating '${secretName}'...`);
     const result = await manager.rotateNow(secretName);
 
@@ -1264,17 +1113,10 @@ rotationCommand
   .argument("<secret>", "Name of the secret")
   .action(async (secretName) => {
     const db = new SecretDatabase();
-    if (!db.isInitialized()) {
-      log.error("Vault not initialized.");
-      process.exit(1);
-    }
-
-    const password =
-      await getPasswordAuto(db);
-    await db.unlock(password);
+    openVault(db);
 
     const manager = new RotationManager(db);
-    
+
     log.info(`Testing rotation for '${secretName}'...`);
     const result = await manager.testRotation(secretName);
 
@@ -1317,7 +1159,7 @@ rotationCommand
         timestamp: h.timestamp.replace("T", " ").split(".")[0],
         secret: h.secretName,
         provider: h.providerType,
-        status: h.status === "success" ? "✓ Success" : "✗ Failed",
+        status: h.status === "success" ? "OK" : "FAILED",
         error: h.errorMessage ? h.errorMessage.substring(0, 30) + "..." : "",
       })),
       [
@@ -1338,10 +1180,6 @@ rotationCommand
   .option("-y, --confirm", "Skip confirmation prompt")
   .action(async (secretName, options) => {
     const db = new SecretDatabase();
-    if (!db.isInitialized()) {
-      log.error("Vault not initialized.");
-      process.exit(1);
-    }
 
     if (!options.confirm) {
       const confirmed = await confirm(`Delete rotation config for '${secretName}'?`);
@@ -1351,9 +1189,7 @@ rotationCommand
       }
     }
 
-    const password =
-      await getPasswordAuto(db);
-    await db.unlock(password);
+    openVault(db);
 
     const manager = new RotationManager(db);
     manager.deleteRotationConfig(secretName);
@@ -1368,7 +1204,7 @@ rotationCommand
 
 program
   .command("mcp")
-  .description("Start MCP server for Claude Code integration (requires daemon running)")
+  .description("Start MCP server for Claude Code integration")
   .action(async () => {
     // MCP server runs via stdio - just import and run
     await import("./mcp");
@@ -1378,11 +1214,9 @@ program
 // auto - Automatic setup and daemon start for Claude Code integration
 // ============================================================================
 
-const KEY_FILE_NAME = ".keyfile";
-
 program
   .command("auto")
-  .description("Automatically initialize vault and start daemon (for Claude Code hooks)")
+  .description("Auto-initialize vault, import .env, and start daemon")
   .option("-l, --local", "Use project-local vault (recommended)")
   .option("-q, --quiet", "Suppress output except errors")
   .action(async (options) => {
@@ -1407,13 +1241,13 @@ program
 
       // Step 1: Check if vault is initialized
       let db = new SecretDatabase(undefined, useLocal);
-      let password: string;
+      let key: string;
 
       if (!db.isInitialized()) {
         logQuiet.info("Initializing new vault...");
 
         // Generate a secure key
-        password = generateMasterKey();
+        key = generateMasterKey();
 
         // Create vault directory with secure permissions
         if (!existsSync(vaultDir)) {
@@ -1421,10 +1255,10 @@ program
         }
 
         // Initialize the vault
-        await db.initialize(password);
+        await db.initialize(key);
 
         // Save the key to a secure file
-        writeFileSync(keyFilePath, password, { mode: 0o600 });
+        writeFileSync(keyFilePath, key, { mode: 0o600 });
 
         // Create .gitignore for local vaults
         if (useLocal) {
@@ -1437,8 +1271,8 @@ program
 
         // Always show the generated key so user can back it up
         console.log();
-        log.warning("YOUR MASTER KEY (save this somewhere safe!):");
-        console.log(chalk.bold.yellow(`  ${password}`));
+        log.warning("YOUR ENCRYPTION KEY (save this somewhere safe!):");
+        console.log(chalk.bold.yellow(`  ${key}`));
         console.log();
         log.dim("This key is also saved in: " + keyFilePath);
       } else {
@@ -1446,23 +1280,21 @@ program
 
         // Load key from keyfile or environment
         if (process.env.SECRET_KEEPER_PASSWORD) {
-          password = process.env.SECRET_KEEPER_PASSWORD;
+          key = process.env.SECRET_KEEPER_PASSWORD;
         } else if (existsSync(keyFilePath)) {
-          password = readFileSync(keyFilePath, "utf-8").trim();
+          key = readFileSync(keyFilePath, "utf-8").trim();
         } else {
           // No keyfile and no env var - can't auto-start
-          // In quiet mode, silently exit (vault was set up with manual password)
           if (quiet) {
             process.exit(0);
           }
           log.error("No keyfile found and SECRET_KEEPER_PASSWORD not set.");
           log.dim(`Expected keyfile at: ${keyFilePath}`);
-          log.dim("This vault was created with a manual password.");
-          log.dim("Either set SECRET_KEEPER_PASSWORD or start daemon manually: sk daemon");
+          log.dim("Run 'sk reset --reinit' to create a new vault.");
           process.exit(1);
         }
 
-        await db.unlock(password);
+        db.loadKey(key);
       }
 
       // Step 2: Auto-import .env files if present
@@ -1551,7 +1383,7 @@ program
         shell: true,
         env: {
           ...process.env,
-          SECRET_KEEPER_PASSWORD: password,
+          SECRET_KEEPER_PASSWORD: key,
           HOME: process.env.HOME || "",
           PATH: process.env.PATH || "",
         },
@@ -1594,7 +1426,7 @@ program
 
 program
   .command("reset")
-  .description("Reset vault completely and start fresh")
+  .description("Reset vault completely (deletes all secrets)")
   .option("-l, --local", "Reset project-local vault (default)")
   .option("-g, --global", "Reset global vault")
   .option("-y, --yes", "Skip confirmation prompt")
@@ -1678,18 +1510,18 @@ program
       log.info("Reinitializing vault...");
 
       // Generate a new key and initialize
-      const password = generateMasterKey();
+      const key = generateMasterKey();
 
       // Create vault directory
       mkdirSync(vaultDir, { recursive: true, mode: 0o700 });
 
       // Initialize vault
       const db = new SecretDatabase(undefined, useLocal);
-      await db.initialize(password);
+      await db.initialize(key);
 
       // Save keyfile
       const keyFilePath = join(vaultDir, KEY_FILE_NAME);
-      writeFileSync(keyFilePath, password, { mode: 0o600 });
+      writeFileSync(keyFilePath, key, { mode: 0o600 });
 
       // Create .gitignore for local vaults
       if (useLocal) {
@@ -1701,8 +1533,8 @@ program
 
       // Show the new key
       console.log();
-      log.warning("YOUR NEW MASTER KEY (save this somewhere safe!):");
-      console.log(chalk.bold.yellow(`  ${password}`));
+      log.warning("YOUR NEW ENCRYPTION KEY (save this somewhere safe!):");
+      console.log(chalk.bold.yellow(`  ${key}`));
       console.log();
       log.dim("This key is also saved in: " + keyFilePath);
 
@@ -1726,12 +1558,7 @@ program
         mkdirSync(logDir, { recursive: true, mode: 0o700 });
       }
 
-      const { openSync, closeSync, spawn } = await import("fs").then(fs => ({
-        openSync: fs.openSync,
-        closeSync: fs.closeSync,
-        spawn: require("child_process").spawn
-      }));
-
+      const { openSync, closeSync } = await import("fs");
       const logPath = `${logDir}/daemon.log`;
       const outFd = openSync(logPath, "a");
 
@@ -1743,7 +1570,7 @@ program
         shell: true,
         env: {
           ...process.env,
-          SECRET_KEEPER_PASSWORD: password,
+          SECRET_KEEPER_PASSWORD: key,
           HOME: process.env.HOME || "",
           PATH: process.env.PATH || "",
         },

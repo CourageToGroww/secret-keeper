@@ -163,7 +163,7 @@ export function Projects({ onBack }: ProjectsProps): React.ReactElement {
             {selectedProject.hasKeyfile ? (
               <Text color="green">Present (auto-start enabled)</Text>
             ) : (
-              <Text color="yellow">None (manual password required)</Text>
+              <Text color="yellow">None (run 'sk init' to create)</Text>
             )}
           </Text>
           {selectedProject.hasKeyfile && (
